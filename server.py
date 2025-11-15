@@ -1,147 +1,20 @@
 import os
-import subprocess
-import tempfile
 from pathlib import Path
-from urllib.parse import urlparse, urlunparse, quote
-import re
 from typing import Optional
+import re
 
 from fastmcp import FastMCP
 
+from overleaf_git import clone_overleaf_repo, run, get_git_email
+from latex_utils import (
+    normalize_latex_content,
+    latex_preview,
+    extract_section_body,
+    strip_latex_to_plain,
+)
+
 # MCP server instance
 mcp = FastMCP("overleaf-mcp")
-
-# Overleaf configuration
-OVERLEAF_GIT_URL = os.environ.get("OVERLEAF_GIT_URL")
-OVERLEAF_TOKEN = os.environ.get("OVERLEAF_TOKEN")
-OVERLEAF_EMAIL = os.environ.get("OVERLEAF_EMAIL")
-
-
-def run(cmd, cwd=None):
-    """
-    Run a shell command and capture stderr/stdout so we can see git errors.
-    """
-    result = subprocess.run(
-        cmd,
-        cwd=cwd,
-        capture_output=True,
-        text=True,
-    )
-
-    if result.returncode != 0:
-        raise RuntimeError(
-            f"Command failed: {' '.join(cmd)}\n"
-            f"returncode: {result.returncode}\n"
-            f"stdout:\n{result.stdout}\n"
-            f"stderr:\n{result.stderr}"
-        )
-
-    return result
-
-
-def clone_overleaf_repo() -> Path:
-    """
-    Clone the Overleaf Git repository using the Git auth token.
-
-    OVERLEAF_GIT_URL should be the plain project URL, e.g.:
-        https://git.overleaf.com/<project-id>
-
-    OVERLEAF_TOKEN is your Git authentication token from Overleaf.
-    """
-    if not OVERLEAF_GIT_URL or not OVERLEAF_TOKEN:
-        raise RuntimeError(
-            "Missing Overleaf configuration. Set OVERLEAF_GIT_URL and "
-            "OVERLEAF_TOKEN environment variables."
-        )
-
-    if not OVERLEAF_GIT_URL.startswith("https://"):
-        raise RuntimeError("OVERLEAF_GIT_URL must start with https://")
-
-    # Create temp dir and keep a global reference so it's not cleaned up early
-    tmpdir = tempfile.TemporaryDirectory()
-    repo_dir = Path(tmpdir.name) / "project"
-    if "_TMPDIRS" not in globals():
-        globals()["_TMPDIRS"] = []
-    globals()["_TMPDIRS"].append(tmpdir)
-
-    # Parse the base URL (e.g. https://git.overleaf.com/<project-id>)
-    parsed = urlparse(OVERLEAF_GIT_URL)
-    if not parsed.hostname:
-        raise RuntimeError(f"Invalid OVERLEAF_GIT_URL: {OVERLEAF_GIT_URL}")
-
-    # Overleaf expects: username "git", password = token.
-    # We embed that as: https://git:<token>@git.overleaf.com/<project-id>
-    user = "git"
-    password = quote(OVERLEAF_TOKEN, safe="")
-
-    host = parsed.hostname
-    netloc = f"{user}:{password}@{host}"
-    if parsed.port:
-        netloc += f":{parsed.port}"
-
-    auth_url = urlunparse(parsed._replace(netloc=netloc))
-
-    # Perform git clone
-    run(["git", "clone", auth_url, str(repo_dir)])
-
-    return repo_dir
-
-
-def normalize_latex_content(s: str) -> str:
-    """
-    Fix common escaping issues from tool calls, especially '\\n' being used
-    as a literal instead of a linebreak after '\\'.
-    Example:
-        '...May 2026\\\\nMaster...' -> '...May 2026\\\\\\nMaster...'
-    """
-    return s.replace("\\n", "\\\n")
-
-
-def _latex_preview(text: str) -> str:
-    """
-    Produce a human-friendly preview from LaTeX:
-    - Strip preamble and document env markers
-    - Render section headings as plain text
-    - Render \\item lines as bullets
-    - Skip comments and empty lines
-    """
-    lines = text.splitlines()
-    out: list[str] = []
-
-    section_cmds = ["section", "subsection", "subsubsection", "cvsection", "chapter", "sect"]
-
-    for line in lines:
-        stripped = line.strip()
-        if not stripped:
-            continue
-        if stripped.startswith("%"):
-            continue
-        if stripped.startswith("\\documentclass"):
-            continue
-        if stripped.startswith("\\usepackage"):
-            continue
-        if stripped.startswith("\\begin{document}") or stripped.startswith("\\end{document}"):
-            continue
-
-        # Section-like commands: \section{Title}, \sect{Title}, etc.
-        m = re.match(r"\\([a-zA-Z]+)\*?\{([^}]*)\}", stripped)
-        if m and m.group(1) in section_cmds:
-            title = m.group(2).strip()
-            out.append("")
-            out.append(title.upper())
-            out.append("-" * len(title))
-            continue
-
-        # \item lines -> bullet points
-        if stripped.startswith("\\item"):
-            content = stripped[len("\\item"):].lstrip()
-            out.append(f"- {content}")
-            continue
-
-        # Default: include line as-is
-        out.append(stripped)
-
-    return "\n".join(out).strip()
 
 
 @mcp.tool
@@ -175,7 +48,7 @@ def read_overleaf_file(
     if raw:
         return content
 
-    return _latex_preview(content)
+    return latex_preview(content)
 
 
 @mcp.tool
@@ -227,12 +100,13 @@ def update_overleaf_section(
     path : str
         File to edit, e.g. "test.tex" or "ARYAN-PANDIT-RESUME-2/dothis.tex".
     section_title : str
-        The exact title of the section, e.g. "PROJECTS", "TECHNICAL SKILLS".
+        The exact title of the section, e.g. "PROJECTS", "TECHNICAL SKILLS",
+        "Introduction", "Methodology", etc.
     heading_command : str
         The LaTeX command used for the section header.
         Examples:
           - "section"  -> matches \section{PROJECTS}
-          - "sect"     -> matches \sect{PROJECTS} (your resume macro)
+          - "sect"     -> matches \sect{PROJECTS} (custom macro)
     new_section_body : str
         New content for that section (LaTeX). Only the body is replaced.
     commit_message : str | None
@@ -288,7 +162,7 @@ def update_overleaf_section(
 
     file_path.write_text(new_text, encoding="utf-8")
 
-    email = OVERLEAF_EMAIL or "overleaf-mcp@example.com"
+    email = get_git_email()
     run(["git", "config", "user.name", "Overleaf MCP Bot"], cwd=repo_dir)
     run(["git", "config", "user.email", email], cwd=repo_dir)
 
@@ -311,6 +185,74 @@ def update_overleaf_section(
         f"Successfully updated section '{section_title}' in '{path}' "
         f"and pushed to Overleaf."
     )
+
+
+@mcp.tool
+def summarize_overleaf_section(
+    path: str,
+    section_title: str,
+    heading_command: str = "section",
+    max_sentences: int = 3,
+) -> str:
+    """
+    Summarize a specific LaTeX section in simple language.
+
+    - Keeps important technical words.
+    - Returns a short summary plus one example line if possible.
+
+    Works for resumes, research papers, and theses.
+    """
+    try:
+        repo_dir = clone_overleaf_repo()
+    except Exception as e:
+        return f"Git clone failed:\n{e}"
+
+    file_path = repo_dir / path
+    if not file_path.exists():
+        return f"File '{path}' does not exist in the Overleaf project."
+
+    full_text = file_path.read_text(encoding="utf-8")
+    body = extract_section_body(full_text, section_title, heading_command)
+
+    if body is None:
+        return (
+            f"Section '{section_title}' with heading '\\{heading_command}' "
+            f"not found in '{path}'."
+        )
+
+    plain = strip_latex_to_plain(body)
+
+    if not plain:
+        return f"Section '{section_title}' is empty or could not be parsed."
+
+    # Very simple sentence splitting
+    sentences = re.split(r"(?<=[.!?])\s+", plain)
+    sentences = [s.strip() for s in sentences if s.strip()]
+
+    if not sentences:
+        return plain
+
+    summary_sentences = sentences[:max_sentences]
+    summary = " ".join(summary_sentences)
+
+    # Try to pick one concrete example line:
+    lines = [l.strip() for l in plain.splitlines() if l.strip()]
+    bullet_lines = [l for l in lines if l.startswith("- ")]
+    if bullet_lines:
+        example = bullet_lines[0]
+    elif len(sentences) > 1:
+        example = sentences[1]
+    else:
+        example = sentences[0]
+
+    result_parts = [
+        f"Summary of '{section_title}':",
+        summary,
+        "",
+        "Example:",
+        example,
+    ]
+    return "\n".join(result_parts).strip()
 
 
 if __name__ == "__main__":
