@@ -45,7 +45,6 @@ Set the following:
 ```bash
 export OVERLEAF_GIT_URL="https://git.overleaf.com/<project-id>"
 export OVERLEAF_TOKEN="olp_your_access_token"
-export OVERLEAF_EMAIL="your_email@example.com"
 ```
 
 Required:
@@ -54,7 +53,6 @@ OVERLEAF_GIT_URL — Overleaf Git HTTPS URL
 
 OVERLEAF_TOKEN — Overleaf Git access token
 
-OVERLEAF_EMAIL — used only for commit metadata
 
 ### 4. Run the MCP server
 ```bash
