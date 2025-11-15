@@ -14,6 +14,7 @@ mcp = FastMCP("overleaf-mcp")
 # Overleaf configuration
 OVERLEAF_GIT_URL = os.environ.get("OVERLEAF_GIT_URL")
 OVERLEAF_TOKEN = os.environ.get("OVERLEAF_TOKEN")
+OVERLEAF_EMAIL = os.environ.get("OVERLEAF_EMAIL")
 
 
 def run(cmd, cwd=None):
